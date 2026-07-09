@@ -36,6 +36,36 @@ function TrashIcon({ className }: { className?: string }) {
 }
  
 // ---------------------------------------------
+// Minimal type declarations for the Web Speech API
+// ---------------------------------------------
+// TypeScript doesn't ship these by default. This is just enough typing
+// to avoid errors — no extra npm package needed.
+interface SpeechRecognitionEvent extends Event {
+  resultIndex: number;
+  results: {
+    [index: number]: {
+      [index: number]: { transcript: string };
+      isFinal: boolean;
+      length: number;
+    };
+    length: number;
+  };
+}
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+}
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start: () => void;
+  stop: () => void;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onend: (() => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+}
+ 
+// ---------------------------------------------
 // TYPE for a single saved note
 // ---------------------------------------------
 // Swap/extend this later once real transcription + audio storage is wired up.
@@ -59,11 +89,28 @@ export default function App() {
   const mediaRecorderRef = React.useRef<MediaRecorder | null>(null);
   const audioChunksRef = React.useRef<Blob[]>([]);
  
+  // Holds the active SpeechRecognition instance (the thing that gives us live text).
+  const recognitionRef = React.useRef<SpeechRecognition | null>(null);
+ 
+  // Holds the finished, locked-in words so far. Interim (still-being-guessed)
+  // words are NOT stored here — only text the browser is confident about.
+  const finalTranscriptRef = React.useRef('');
+ 
+  // This is what's actually shown on screen live while recording.
+  // It's finalTranscriptRef's text PLUS whatever interim guess is currently forming.
+  const [liveTranscript, setLiveTranscript] = useState('');
+ 
+  // Tracks whether we're deliberately stopping (so onend doesn't try to
+  // auto-restart recognition right as the user is stopping on purpose).
+  const isStoppingRef = React.useRef(false);
+ 
   // Called when the mic button is clicked. Starts or stops recording depending on current state.
   async function toggleRecording() {
     if (isRecording) {
       // --- STOP RECORDING ---
+      isStoppingRef.current = true;
       mediaRecorderRef.current?.stop();
+      recognitionRef.current?.stop();
       setIsRecording(false);
       return;
     }
@@ -73,43 +120,97 @@ export default function App() {
       // Ask the browser for microphone access (this triggers the permission popup).
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
  
+      // --- Part 1: MediaRecorder — captures the actual audio so we can play it back later ---
       const recorder = new MediaRecorder(stream);
       mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
  
-      // Every time the recorder has a chunk of audio data ready, save it.
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
       };
  
-      // Runs once recording is fully stopped.
       recorder.onstop = () => {
         // Combine all the audio chunks into one playable audio file (blob).
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         const audioUrl = URL.createObjectURL(audioBlob);
  
-        // TODO: send `audioBlob` to your AI transcription service here.
-        // For now, we just add a placeholder note with a working audio player
-        // so you can confirm recording + playback actually works end-to-end.
+        // Use whatever text Speech Recognition captured live as the note's transcript.
+        const transcriptText = finalTranscriptRef.current.trim() || '(No speech detected)';
+ 
         setNotes((prev) => [
           {
             id: Date.now(),
-            title: 'New recording',
-            text: '(Transcription not hooked up yet — this is just the raw recording.)',
+            title: transcriptText.slice(0, 40) || 'New recording', // quick auto-title from the start of the transcript
+            text: transcriptText,
             duration: '—',
             date: 'Today',
-            audioUrl, // used by the play button below
+            audioUrl,
           },
           ...prev,
         ]);
+ 
+        // Reset for next time.
+        finalTranscriptRef.current = '';
+        setLiveTranscript('');
  
         // Stop the mic from staying "on" in the browser tab after we're done.
         stream.getTracks().forEach((track) => track.stop());
       };
  
       recorder.start();
+ 
+      // --- Part 2: SpeechRecognition — gives us LIVE text while talking ---
+      // TypeScript doesn't know about this browser API by default, hence the "as any".
+      const SpeechRecognitionCtor =
+        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+ 
+      if (!SpeechRecognitionCtor) {
+        alert('Live transcription needs Chrome or Edge — this browser doesn\'t support it. Recording audio only.');
+      } else {
+        const recognition: SpeechRecognition = new SpeechRecognitionCtor();
+        recognitionRef.current = recognition;
+ 
+        recognition.continuous = true; // keep listening instead of stopping after one phrase
+        recognition.interimResults = true; // give us "still guessing" text too, not just final text
+        recognition.lang = 'en-US';
+ 
+        // Fires repeatedly as speech is recognized — both interim (rough) and final (locked-in) text.
+        recognition.onresult = (event: SpeechRecognitionEvent) => {
+          let interimText = '';
+ 
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const result = event.results[i];
+            if (result.isFinal) {
+              // This chunk is locked in — permanently add it to our saved transcript.
+              finalTranscriptRef.current += result[0].transcript + ' ';
+            } else {
+              // Still being guessed — show it, but don't save it permanently yet.
+              interimText += result[0].transcript;
+            }
+          }
+ 
+          // Update what's shown on screen: locked-in text + current rough guess.
+          setLiveTranscript(finalTranscriptRef.current + interimText);
+        };
+ 
+        // Chrome auto-stops listening after a few seconds of silence.
+        // If we're not deliberately stopping, restart it so it feels continuous.
+        recognition.onend = () => {
+          if (!isStoppingRef.current && isRecording) {
+            recognition.start();
+          }
+        };
+ 
+        recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+          console.error('Speech recognition error:', event.error);
+        };
+ 
+        isStoppingRef.current = false;
+        recognition.start();
+      }
+ 
       setIsRecording(true);
     } catch (err) {
       // This runs if the user denies mic permission, or no mic is available.
@@ -182,6 +283,13 @@ export default function App() {
             <span className="text-sm font-medium text-slate-600">
               {isRecording ? 'Listening carefully...' : 'Tap to start recording'}
             </span>
+ 
+            {/* Live transcript preview — updates in real time while recording */}
+            {isRecording && (
+              <p className="text-xs text-slate-500 text-center px-2 max-h-20 overflow-y-auto">
+                {liveTranscript || 'Say something...'}
+              </p>
+            )}
           </div>
  
           <div className="text-xs text-slate-400 text-center">
