@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Mic, FileText, Sparkles, Folder } from 'lucide-react';
 
-
+ 
 // ---------------------------------------------
 // Simple inline icons (no extra package needed)
 // ---------------------------------------------
@@ -45,35 +45,77 @@ interface Note {
   text: string;
   duration: string; // e.g. "0:51"
   date: string; // e.g. "Jul 4"
+  audioUrl?: string; // link to the recorded audio, if we have one
 }
  
 export default function App() {
   const [isRecording, setIsRecording] = useState(false);
  
-  // Holds all saved notes. Starts with one sample note so you can SEE the
-  // card design right away. Delete this sample note (or clear the array)
-  // once you wire up real recording/transcription.
-  const [notes, setNotes] = useState<Note[]>([
-    {
-      id: 1,
-      title: "Sample note",
-      text: "This is a placeholder note so you can see what a saved transcript looks like in the list. Record a real one or delete this to clear it out.",
-      duration: "0:24",
-      date: "Yesterday",
-    },
-  ]);
+  // Holds all saved notes. Starts empty — recording adds real notes to this list.
+  const [notes, setNotes] = useState<Note[]>([]);
  
-  // Called when the mic button is clicked (toggles recording on/off).
-  function toggleRecording() {
-    setIsRecording((prev) => !prev);
+  // Holds the active MediaRecorder instance and the audio chunks it's collecting.
+  // useRef is used instead of useState because we don't need a re-render when these change.
+  const mediaRecorderRef = React.useRef<MediaRecorder | null>(null);
+  const audioChunksRef = React.useRef<Blob[]>([]);
  
-    // TODO: this is where real audio recording + AI transcription hooks in.
-    // Once you get a transcript back, add it to the list like this:
-    //
-    // setNotes((prev) => [
-    //   { id: Date.now(), title: "New note", text: transcriptText, duration: "0:00", date: "Today" },
-    //   ...prev,
-    // ]);
+  // Called when the mic button is clicked. Starts or stops recording depending on current state.
+  async function toggleRecording() {
+    if (isRecording) {
+      // --- STOP RECORDING ---
+      mediaRecorderRef.current?.stop();
+      setIsRecording(false);
+      return;
+    }
+ 
+    // --- START RECORDING ---
+    try {
+      // Ask the browser for microphone access (this triggers the permission popup).
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+ 
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+ 
+      // Every time the recorder has a chunk of audio data ready, save it.
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+ 
+      // Runs once recording is fully stopped.
+      recorder.onstop = () => {
+        // Combine all the audio chunks into one playable audio file (blob).
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const audioUrl = URL.createObjectURL(audioBlob);
+ 
+        // TODO: send `audioBlob` to your AI transcription service here.
+        // For now, we just add a placeholder note with a working audio player
+        // so you can confirm recording + playback actually works end-to-end.
+        setNotes((prev) => [
+          {
+            id: Date.now(),
+            title: 'New recording',
+            text: '(Transcription not hooked up yet — this is just the raw recording.)',
+            duration: '—',
+            date: 'Today',
+            audioUrl, // used by the play button below
+          },
+          ...prev,
+        ]);
+ 
+        // Stop the mic from staying "on" in the browser tab after we're done.
+        stream.getTracks().forEach((track) => track.stop());
+      };
+ 
+      recorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      // This runs if the user denies mic permission, or no mic is available.
+      console.error('Could not access microphone:', err);
+      alert('Microphone access is required to record. Please allow it and try again.');
+    }
   }
  
   // Removes a note by id.
@@ -94,10 +136,14 @@ export default function App() {
     }
   }
  
-  // Placeholder for playing back a note's audio.
+  // Plays back a note's recorded audio, if we have one.
   function playNote(id: number) {
-    // TODO: hook up real audio playback here (e.g. new Audio(note.audioUrl).play())
-    console.log('Playing note', id);
+    const note = notes.find((n) => n.id === id);
+    if (note?.audioUrl) {
+      new Audio(note.audioUrl).play();
+    } else {
+      console.log('No audio available for this note yet.');
+    }
   }
  
   return (
