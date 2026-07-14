@@ -36,6 +36,21 @@ function TrashIcon({ className }: { className?: string }) {
 }
  
 // ---------------------------------------------
+// Minimal type declaration for Puter.js
+// ---------------------------------------------
+// Puter.js attaches itself to the global window object via the <script> tag
+// in our HTML — this just tells TypeScript that puter.ai.chat() exists.
+declare global {
+  interface Window {
+    puter: {
+      ai: {
+        chat: (prompt: string, options?: { model?: string }) => Promise<string>;
+      };
+    };
+  }
+}
+ 
+// ---------------------------------------------
 // Minimal type declarations for the Web Speech API
 // ---------------------------------------------
 // TypeScript doesn't ship these by default. This is just enough typing
@@ -74,12 +89,24 @@ interface Note {
   title: string;
   text: string;
   duration: string; // e.g. "0:51"
-  date: string; // e.g. "Jul 4"
+  date: string; // display text, e.g. "Jul 4"
+  createdAt: number; // real timestamp (ms) — used for accurate date filtering
   audioUrl?: string; // link to the recorded audio, if we have one
+  summary?: string; // AI-generated summary, once requested
+  isSummarizing?: boolean; // true while we're waiting on the AI response
 }
  
 export default function App() {
   const [isRecording, setIsRecording] = useState(false);
+ 
+  // Which screen we're showing: the main recording view, or the full Library.
+  const [view, setView] = useState<'home' | 'library'>('home');
+ 
+  // What the user has typed into the Library search box.
+  const [searchQuery, setSearchQuery] = useState('');
+ 
+  // Which date range filter is active in the Library.
+  const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'week'>('all');
  
   // Holds all saved notes. Starts empty — recording adds real notes to this list.
   const [notes, setNotes] = useState<Note[]>([]);
@@ -146,6 +173,7 @@ export default function App() {
             text: transcriptText,
             duration: '—',
             date: 'Today',
+            createdAt: Date.now(),
             audioUrl,
           },
           ...prev,
@@ -237,7 +265,37 @@ export default function App() {
     }
   }
  
-  // Plays back a note's recorded audio, if we have one.
+  // Sends a note's transcript to Puter.js, which asks an AI model to summarize it.
+  // No API key, no backend call needed — Puter.js handles this directly in the browser.
+  async function summarizeNote(id: number) {
+    const note = notes.find((n) => n.id === id);
+    if (!note) return;
+ 
+    // Show a loading state on this specific note while we wait.
+    setNotes((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, isSummarizing: true } : n))
+    );
+ 
+    try {
+      const prompt = `Summarize this voice note transcript in 1-3 short sentences. Be concise and capture the key point(s):\n\n"${note.text}"`;
+ 
+      const summary = await window.puter.ai.chat(prompt, { model: 'gpt-5-nano' });
+ 
+      setNotes((prev) =>
+        prev.map((n) =>
+          n.id === id ? { ...n, summary, isSummarizing: false } : n
+        )
+      );
+    } catch (err) {
+      console.error('Failed to summarize:', err);
+      setNotes((prev) =>
+        prev.map((n) =>
+          n.id === id ? { ...n, isSummarizing: false } : n
+        )
+      );
+      alert('Could not summarize this note. Please try again.');
+    }
+  }
   function playNote(id: number) {
     const note = notes.find((n) => n.id === id);
     if (note?.audioUrl) {
@@ -245,6 +303,99 @@ export default function App() {
     } else {
       console.log('No audio available for this note yet.');
     }
+  }
+ 
+  // Figures out which notes to show in the Library based on the search box
+  // and the selected date filter (Today / This Week / All Time).
+  function getFilteredNotes(): Note[] {
+    const now = Date.now();
+    const oneDayMs = 24 * 60 * 60 * 1000;
+ 
+    return notes.filter((note) => {
+      // Date filter check
+      if (dateFilter === 'today' && now - note.createdAt > oneDayMs) {
+        return false;
+      }
+      if (dateFilter === 'week' && now - note.createdAt > oneDayMs * 7) {
+        return false;
+      }
+ 
+      // Search check — matches against title or transcript text (case-insensitive)
+      if (searchQuery.trim()) {
+        const query = searchQuery.toLowerCase();
+        const matchesTitle = note.title.toLowerCase().includes(query);
+        const matchesText = note.text.toLowerCase().includes(query);
+        if (!matchesTitle && !matchesText) return false;
+      }
+ 
+      return true;
+    });
+  }
+ 
+  // Renders one note as a card. Shared by both the Home panel and the Library
+  // so we don't maintain two copies of the same markup.
+  function renderNoteCard(note: Note) {
+    return (
+      <div
+        key={note.id}
+        className="flex items-start gap-4 border border-slate-200 rounded-xl p-4"
+      >
+        {/* Play button */}
+        <button
+          onClick={() => playNote(note.id)}
+          className="w-10 h-10 rounded-full bg-indigo-50 hover:bg-indigo-100 flex items-center justify-center flex-shrink-0"
+        >
+          <PlayIcon className="w-4 h-4 text-indigo-600" />
+        </button>
+ 
+        {/* Title, transcript text, meta info */}
+        <div className="flex-1 min-w-0">
+          <p className="font-semibold text-slate-800">{note.title}</p>
+          <p className="text-sm text-slate-600 mt-1">{note.text}</p>
+          <div className="flex gap-3 text-xs text-slate-400 mt-2">
+            <span>{note.duration}</span>
+            <span>{note.date}</span>
+          </div>
+ 
+          {/* Summarize button — only show if we don't already have a summary */}
+          {!note.summary && (
+            <button
+              onClick={() => summarizeNote(note.id)}
+              disabled={note.isSummarizing}
+              className="mt-3 text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {note.isSummarizing ? 'Summarizing...' : '✨ Summarize'}
+            </button>
+          )}
+ 
+          {/* Once we have a summary, show it in a highlighted box */}
+          {note.summary && (
+            <div className="mt-3 bg-indigo-50 border border-indigo-100 rounded-lg p-3">
+              <p className="text-xs font-semibold text-indigo-700 mb-1">AI Summary</p>
+              <p className="text-sm text-indigo-900">{note.summary}</p>
+            </div>
+          )}
+        </div>
+ 
+        {/* Edit / Delete buttons */}
+        <div className="flex gap-2 flex-shrink-0">
+          <button
+            onClick={() => editNote(note.id)}
+            className="text-slate-400 hover:text-slate-700 p-1"
+            title="Edit"
+          >
+            <PencilIcon className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => deleteNote(note.id)}
+            className="text-slate-400 hover:text-rose-600 p-1"
+            title="Delete"
+          >
+            <TrashIcon className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    );
   }
  
   return (
@@ -256,110 +407,147 @@ export default function App() {
           <h1 className="text-xl font-bold tracking-tight text-slate-900">Voice Notes</h1>
         </div>
         <div className="text-sm text-slate-500 font-medium">Capture your ideas instantly</div>
-        <div className="text-lg text-slate-500">A PjordanLLC Project </div>
+ 
+        {/* Toggle between Home and Library screens */}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setView('home')}
+            className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
+              view === 'home'
+                ? 'bg-indigo-600 text-white'
+                : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            Home
+          </button>
+          <button
+            onClick={() => setView('library')}
+            className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
+              view === 'library'
+                ? 'bg-indigo-600 text-white'
+                : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            Library
+          </button>
+        </div>
       </header>
  
-      {/* Main Container */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-6 grid grid-cols-1 md:grid-cols-3 gap-6">
+      {view === 'home' ? (
+        /* ---------------------------------------------
+           HOME VIEW — recording console + recent notes
+        --------------------------------------------- */
+        <main className="flex-1 max-w-6xl w-full mx-auto p-6 grid grid-cols-1 md:grid-cols-3 gap-6">
  
-        {/* Left Column: Voice Capture Console */}
-        <section className="md:col-span-1 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between h-[400px]">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-800 mb-2">Voice Capture</h2>
-            <p className="text-sm text-slate-500">Record your thoughts, lectures, or meetings. Let AI handle the heavy lifting.</p>
-          </div>
+          {/* Left Column: Voice Capture Console */}
+          <section className="md:col-span-1 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between h-[400px]">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-800 mb-2">Voice Capture</h2>
+              <p className="text-sm text-slate-500">Record your thoughts, lectures, or meetings. Let AI handle the heavy lifting.</p>
+            </div>
  
-          <div className="flex flex-col items-center justify-center gap-4">
-            <button
-              onClick={toggleRecording}
-              className={`w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300 shadow-md ${
-                isRecording
-                  ? 'bg-rose-500 hover:bg-rose-600 animate-pulse text-white'
-                  : 'bg-indigo-600 hover:bg-indigo-700 text-white'
-              }`}
-            >
-              <Mic className="w-10 h-10" />
-            </button>
-            <span className="text-sm font-medium text-slate-600">
-              {isRecording ? 'Listening carefully...' : 'Tap to start recording'}
-            </span>
+            <div className="flex flex-col items-center justify-center gap-4">
+              <button
+                onClick={toggleRecording}
+                className={`w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300 shadow-md ${
+                  isRecording
+                    ? 'bg-rose-500 hover:bg-rose-600 animate-pulse text-white'
+                    : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                }`}
+              >
+                <Mic className="w-10 h-10" />
+              </button>
+              <span className="text-sm font-medium text-slate-600">
+                {isRecording ? 'Listening carefully...' : 'Tap to start recording'}
+              </span>
  
-            {/* Live transcript preview — updates in real time while recording */}
-            {isRecording && (
-              <p className="text-xs text-slate-500 text-center px-2 max-h-20 overflow-y-auto">
-                {liveTranscript || 'Say something...'}
-              </p>
+              {/* Live transcript preview — updates in real time while recording */}
+              {isRecording && (
+                <p className="text-xs text-slate-500 text-center px-2 max-h-20 overflow-y-auto">
+                  {liveTranscript || 'Say something...'}
+                </p>
+              )}
+            </div>
+ 
+            <div className="text-xs text-slate-400 text-center">
+              Max recording length: 10 minutes
+            </div>
+          </section>
+ 
+          {/* Right Column: Audio Notes Library (recent notes preview) */}
+          <section className="md:col-span-2 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col">
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold text-slate-800">Your Transcripts & Insights</h2>
+              <p className="text-sm text-slate-500">Select a saved note below to see its AI breakdown.</p>
+            </div>
+ 
+            {/* If there are no notes yet, show the original empty-state placeholder */}
+            {notes.length === 0 ? (
+              <div className="flex-1 border-2 border-dashed border-slate-200 rounded-xl flex flex-col items-center justify-center p-8 text-center text-slate-400">
+                <FileText className="w-12 h-12 mb-3 text-slate-300" />
+                <p className="font-medium text-slate-600">No notes found</p>
+                <p className="text-xs max-w-xs mt-1">Your saved speech-to-text transcripts, summaries, and action tasks will show up here.</p>
+              </div>
+            ) : (
+              // Otherwise, list out each saved note as a card
+              <div className="flex-1 overflow-y-auto space-y-3">
+                {notes.map((note) => renderNoteCard(note))}
+              </div>
+            )}
+          </section>
+        </main>
+      ) : (
+        /* ---------------------------------------------
+           LIBRARY VIEW — full searchable/filterable list
+        --------------------------------------------- */
+        <main className="flex-1 max-w-4xl w-full mx-auto p-6">
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col">
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold text-slate-800">Library</h2>
+              <p className="text-sm text-slate-500">All your saved voice notes in one place.</p>
+            </div>
+ 
+            {/* Search + date filter controls */}
+            <div className="flex flex-col sm:flex-row gap-3 mb-4">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search notes..."
+                className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
+              />
+              <select
+                value={dateFilter}
+                onChange={(e) => setDateFilter(e.target.value as 'all' | 'today' | 'week')}
+                className="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
+              >
+                <option value="all">All time</option>
+                <option value="today">Today</option>
+                <option value="week">This week</option>
+              </select>
+            </div>
+ 
+            {/* Filtered results */}
+            {getFilteredNotes().length === 0 ? (
+              <div className="border-2 border-dashed border-slate-200 rounded-xl flex flex-col items-center justify-center p-8 text-center text-slate-400">
+                <FileText className="w-12 h-12 mb-3 text-slate-300" />
+                <p className="font-medium text-slate-600">
+                  {notes.length === 0 ? 'No notes found' : 'No notes match your search'}
+                </p>
+                <p className="text-xs max-w-xs mt-1">
+                  {notes.length === 0
+                    ? 'Record a note from the Home screen to see it here.'
+                    : 'Try a different search term or date range.'}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {getFilteredNotes().map((note) => renderNoteCard(note))}
+              </div>
             )}
           </div>
- 
-          <div className="text-xs text-slate-400 text-center">
-            Max recording length: 10 minutes
-          </div>
-        </section>
- 
-        {/* Right Column: Audio Notes Library */}
-        <section className="md:col-span-2 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold text-slate-800">Your Transcripts & Insights</h2>
-            <p className="text-sm text-slate-500">Select a saved note below to see its AI breakdown.</p>
-          </div>
- 
-          {/* If there are no notes yet, show the original empty-state placeholder */}
-          {notes.length === 0 ? (
-            <div className="flex-1 border-2 border-dashed border-slate-200 rounded-xl flex flex-col items-center justify-center p-8 text-center text-slate-400">
-              <FileText className="w-12 h-12 mb-3 text-slate-300" />
-              <p className="font-medium text-slate-600">No notes found</p>
-              <p className="text-xs max-w-xs mt-1">Your saved speech-to-text transcripts, summaries, and action tasks will show up here.</p>
-            </div>
-          ) : (
-            // Otherwise, list out each saved note as a card
-            <div className="flex-1 overflow-y-auto space-y-3">
-              {notes.map((note) => (
-                <div
-                  key={note.id}
-                  className="flex items-start gap-4 border border-slate-200 rounded-xl p-4"
-                >
-                  {/* Play button */}
-                  <button
-                    onClick={() => playNote(note.id)}
-                    className="w-10 h-10 rounded-full bg-indigo-50 hover:bg-indigo-100 flex items-center justify-center flex-shrink-0"
-                  >
-                    <PlayIcon className="w-4 h-4 text-indigo-600" />
-                  </button>
- 
-                  {/* Title, transcript text, meta info */}
-                  <div className="flex-1 min-w-0">
-                    <p className="font-semibold text-slate-800">{note.title}</p>
-                    <p className="text-sm text-slate-600 mt-1">{note.text}</p>
-                    <div className="flex gap-3 text-xs text-slate-400 mt-2">
-                      <span>{note.duration}</span>
-                      <span>{note.date}</span>
-                    </div>
-                  </div>
- 
-                  {/* Edit / Delete buttons */}
-                  <div className="flex gap-2 flex-shrink-0">
-                    <button
-                      onClick={() => editNote(note.id)}
-                      className="text-slate-400 hover:text-slate-700 p-1"
-                      title="Edit"
-                    >
-                      <PencilIcon className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => deleteNote(note.id)}
-                      className="text-slate-400 hover:text-rose-600 p-1"
-                      title="Delete"
-                    >
-                      <TrashIcon className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      </main>
+        </main>
+      )}
     </div>
   );
 }
