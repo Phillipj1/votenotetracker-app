@@ -407,7 +407,7 @@ export default function App() {
           <h1 className="text-xl font-bold tracking-tight text-slate-900">Voice Notes</h1>
         </div>
         <div className="text-sm text-slate-500 font-medium">Capture your ideas instantly</div>
-        <div className="text-sm text-slate-500 font-medium">PJORDANLLC Project</div>
+        <div className="text-sm text-slate-500 font-medium">PJordanLLC Project</div>
 
  
         {/* Toggle between Home and Library screens */}
